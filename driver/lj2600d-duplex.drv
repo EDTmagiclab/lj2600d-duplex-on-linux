@@ -1,0 +1,94 @@
+// CUPS driver definition for Lenovo LJ2600D automatic duplex printing.
+//
+// This is a thin variant of brlaser's driver file: instead of brlaser's
+// filter it installs `rastertobrlaser-duplex`, which produces the exact same
+// Brother HBP raster stream and then sets the PCL duplex mode in the job
+// prologue.
+//
+// Copyright 2013 Peter De Wachter (original brlaser definitions)
+// Copyright 2026 lj2600d-duplex contributors
+//
+// This file is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free
+// Software Foundation, either version 2 of the License, or (at your option)
+// any later version.
+
+#define USING "using brlaser + duplex filter"
+
+#include <font.defs>
+#include <media.defs>
+
+Font *
+
+Manufacturer "Brother"
+Version "1.0"
+
+// The duplex-aware replacement for brlaser's own raster filter.
+Filter application/vnd.cups-raster 33 rastertobrlaser-duplex
+
+Resolution k 1 0 0 0 "600dpi/600 DPI"
+Resolution k 1 0 0 0 "1200dpi/1200HQ"
+
+// Supported page sizes.
+HWMargins 8 8 8 16
+*MediaSize A4
+MediaSize A5
+MediaSize A6
+MediaSize B5
+MediaSize B6
+MediaSize EnvC5
+MediaSize EnvMonarch
+MediaSize EnvDL
+MediaSize Executive
+MediaSize Legal
+MediaSize Letter
+
+// Input trays. Numbers must match the filter source code.
+*InputSlot 0 "Auto/Auto-select"
+InputSlot 1 "Tray1/Tray 1"
+InputSlot 2 "Tray2/Tray 2"
+InputSlot 3 "Tray3/Tray 3"
+InputSlot 4 "MPTray/MP Tray"
+InputSlot 5 "Manual/Manual"
+
+// Media types.
+*MediaType 0 "PLAIN/Plain paper"
+MediaType 1 "THIN/Thin paper"
+MediaType 2 "THICK/Thick paper"
+MediaType 3 "THICKER/Thicker paper"
+MediaType 4 "BOND/Bond paper"
+MediaType 5 "TRANS/Transparencies"
+MediaType 6 "ENV/Envelopes"
+MediaType 7 "ENV-THICK/Thick envelopes"
+MediaType 8 "ENV-THIN/Thin envelopes"
+
+Option "brlaserEconomode/Toner save mode" Boolean AnySetup 10
+  *Choice False/Off "<</cupsInteger10 0>>setpagedevice"
+  Choice True/On "<</cupsInteger10 1>>setpagedevice"
+
+{
+  ModelName "LJ2600D"
+  Attribute "NickName" "" "Lenovo LJ2600D (duplex), $USING"
+  Attribute "1284DeviceID" "" "MFG:Lenovo;CMD:PJL,HBP;MDL:LJ2600D;CLS:PRINTER;"
+  Duplex rotated
+  PCFileName "lj2600d.ppd"
+}
+
+{
+  ModelName "LJ2650DN"
+  Attribute "NickName" "" "Lenovo LJ2650DN (duplex), $USING"
+  Attribute "1284DeviceID" "" "MFG:Lenovo;CMD:PJL,HBP;MDL:LJ2650DN;CLS:PRINTER;"
+  Duplex rotated
+  PCFileName "lj2650dn.ppd"
+}
+
+// The LJ2600D and the HL-2140 share one engine family, so this entry also
+// fits a genuine HL-2140 (or any HBP printer with a duplex unit).  The PPD
+// name is kept distinct from brlaser's own br2140.ppd on purpose.
+{
+  ModelName "HL-2140 series (duplex)"
+  Attribute "NickName" "" "Brother HL-2140 series (duplex), $USING"
+  Attribute "1284DeviceID" "" "MFG:Brother;CMD:PJL,HBP;MDL:HL-2140 series;CLS:PRINTER;"
+  Duplex rotated
+  PCFileName "hl2140-duplex.ppd"
+}

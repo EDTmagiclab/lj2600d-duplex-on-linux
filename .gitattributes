@@ -1,0 +1,2 @@
+# 过滤器与安装脚本必须在 Linux 上原样执行，统一用 LF。
+* text=auto eol=lf

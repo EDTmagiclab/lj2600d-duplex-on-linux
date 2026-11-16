@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""rastertobrlaser-duplex -- CUPS filter that adds 2-sided printing to brlaser.
+
+The Lenovo LJ2600D is a Brother HBP engine (1284 ID "CMD:PJL,HBP").  The
+brlaser driver already speaks that protocol, so printing works, but brlaser
+never offers duplex: it has no idea the printer can flip a sheet.
+
+brlaser emits, once per job:
+
+    ESC E  ESC & l <copies> X  ESC & l 2 S  <raster data...>
+
+The Lenovo Windows driver, when auto-duplex is ticked, puts the duplex mode
+*before* the copies command:
+
+    ...  ESC & l 7 H  ESC & l 1 S  ESC & l <copies> X  ...
+
+and sends no ESC E at all.  Capture both spool files from the Windows driver
+and the only difference in the whole stream is that one digit.
+
+On this engine the duplex mode is latched when the copies command is
+processed, so a trailing ESC & l 2 S (what brlaser sends) is simply ignored.
+That is why both the position *and* the preceding paper-source command
+(ESC & l 7 H) matter -- move the duplex command after ESC & l <copies> X and
+the printer stays in simplex.
+
+This filter therefore rewrites the job prologue into the shape above and
+passes every other byte through untouched.
+
+Duplex is selected, in order of precedence, by:
+
+  1. the job option  Duplex=<None|DuplexNoTumble|DuplexTumble>
+  2. the IPP attribute  sides=<one-sided|two-sided-long-edge|two-sided-short-edge>
+  3. the "default" key in /etc/cups/lj2600d-duplex.conf
+  4. duplex-long-edge
+
+CUPS does not pass a PPD's *DefaultDuplex down to the filter, which is why
+(3) and (4) exist.
+
+Usage (installed as a CUPS filter):
+    rastertobrlaser-duplex job-id user title copies options [file]
+
+Copyright 2026 lj2600d-duplex contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 2 of the License, or (at your option) any later
+version.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+BRASER = "/usr/lib/cups/filter/rastertobrlaser"
+CONFIG = "/etc/cups/lj2600d-duplex.conf"
+
+# How much of the stream to buffer while looking for the prologue.  brlaser's
+# prologue is well under 1 KiB, but leaving headroom keeps this robust if the
+# PJL header ever grows.
+HEAD_BYTES = 4096
+
+RESET = b"\x1bE"                                  # PCL reset
+PAPER_SOURCE = b"\x1b&l7H"                        # what the Lenovo driver sends
+COPIES = re.compile(rb"\x1b&l\d+X")
+
+MODES = {
+    "simplex": b"0",
+    "duplex-long-edge": b"1",
+    "duplex-short-edge": b"2",
+}
+
+DUPLEX_OPTIONS = {
+    "None": b"0",
+    "DuplexNoTumble": b"1",
+    "DuplexTumble": b"2",
+}
+
+SIDES_OPTIONS = {
+    "one-sided": b"0",
+    "two-sided-long-edge": b"1",
+    "two-sided-short-edge": b"2",
+}
+
+DEFAULT_MODE = "duplex-long-edge"
+
+
+def read_config_default():
+    """Return the configured default mode, or None if there is no config."""
+    try:
+        with open(CONFIG, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.split("#", 1)[0].strip()
+                if line.startswith("default"):
+                    _, _, value = line.partition("=")
+                    value = value.strip().strip("'\"")
+                    if value in MODES:
+                        return value
+    except OSError:
+        pass
+    return None
+
+
+def choose_mode(options):
+    """Pick the PCL duplex value for this job."""
+    parsed = {}
+    for token in options.split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            parsed[key] = value
+
+    if parsed.get("Duplex") in DUPLEX_OPTIONS:
+        return DUPLEX_OPTIONS[parsed["Duplex"]]
+    if parsed.get("sides") in SIDES_OPTIONS:
+        return SIDES_OPTIONS[parsed["sides"]]
+
+    override = os.environ.get("LJ2600D_DUPLEX_DEFAULT")
+    if override in MODES:
+        return MODES[override]
+
+    configured = read_config_default()
+    if configured:
+        return MODES[configured]
+
+    return MODES[DEFAULT_MODE]
+
+
+def rewrite_prologue(head, code):
+    """Replace 'ESC E' with 'ESC & l 7 H ESC & l <code> S'.
+
+    The paper source and duplex mode have to be in place before the copies
+    command, so the reset is dropped rather than kept in front of them.
+    """
+    index = head.find(RESET)
+    if index < 0:
+        return head, False
+
+    if not COPIES.search(head, index + len(RESET), index + 64):
+        return head, False
+
+    prologue = PAPER_SOURCE + b"\x1b&l" + code + b"S"
+    return head[:index] + prologue + head[index + len(RESET):], True
+
+
+def main():
+    argv = sys.argv
+    options = argv[5] if len(argv) > 5 else ""
+    code = choose_mode(options)
+
+    if not os.access(BRASER, os.X_OK):
+        sys.stderr.write(
+            "rastertobrlaser-duplex: %s not found; install printer-driver-brlaser\n"
+            % BRASER
+        )
+        return 1
+
+    # brlaser inherits stderr so its own diagnostics still reach the CUPS log.
+    child = subprocess.Popen([BRASER] + argv[1:], stdout=subprocess.PIPE)
+
+    out = sys.stdout.buffer
+    head = b""
+    while len(head) < HEAD_BYTES:
+        chunk = child.stdout.read(HEAD_BYTES - len(head))
+        if not chunk:
+            break
+        head += chunk
+
+    head, patched = rewrite_prologue(head, code)
+    out.write(head)
+
+    while True:
+        chunk = child.stdout.read(65536)
+        if not chunk:
+            break
+        out.write(chunk)
+    out.flush()
+
+    if head and not patched:
+        sys.stderr.write(
+            "rastertobrlaser-duplex: no 'ESC E ... ESC & l <n> X' prologue "
+            "found, job sent unmodified (duplex will not work)\n"
+        )
+
+    return child.wait()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
